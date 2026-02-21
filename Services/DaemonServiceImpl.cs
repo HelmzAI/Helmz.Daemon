@@ -123,11 +123,11 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
         IServerStreamWriter<StreamOutputResponse> responseStream,
         ServerCallContext context)
     {
-        var reader = _eventBus.SubscribeOutput(request.SessionId);
+        using var subscription = _eventBus.SubscribeOutput(request.SessionId);
 
         try
         {
-            await foreach (var chunk in reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
+            await foreach (var chunk in subscription.Reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
             {
                 await responseStream.WriteAsync(
                     new StreamOutputResponse { Chunk = chunk },
@@ -138,6 +138,7 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
         {
             // Client disconnected — normal for streaming RPCs
         }
+        // subscription.Dispose() auto-unsubscribes from the EventBus
     }
 
     public override async Task StreamActions(
@@ -145,11 +146,11 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
         IServerStreamWriter<StreamActionsResponse> responseStream,
         ServerCallContext context)
     {
-        var reader = _eventBus.SubscribeActions(request.SessionId);
+        using var subscription = _eventBus.SubscribeActions(request.SessionId);
 
         try
         {
-            await foreach (var action in reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
+            await foreach (var action in subscription.Reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
             {
                 await responseStream.WriteAsync(
                     new StreamActionsResponse { Action = action },
@@ -160,6 +161,7 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
         {
             // Client disconnected — normal for streaming RPCs
         }
+        // subscription.Dispose() auto-unsubscribes from the EventBus
     }
 
     public override async Task<RespondToActionResponse> RespondToAction(
