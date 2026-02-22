@@ -146,7 +146,18 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
         IServerStreamWriter<StreamActionsResponse> responseStream,
         ServerCallContext context)
     {
+        // Subscribe first, then check for a missed action — this ordering ensures
+        // we cannot miss an action that arrives between the two steps.
         using var subscription = _eventBus.SubscribeActions(request.SessionId);
+
+        // Replay any action that was published before this subscriber connected.
+        var session = _sessionManager.GetSession(request.SessionId);
+        if (session?.CurrentPendingAction is { } missed)
+        {
+            await responseStream.WriteAsync(
+                new StreamActionsResponse { Action = missed },
+                context.CancellationToken).ConfigureAwait(false);
+        }
 
         try
         {

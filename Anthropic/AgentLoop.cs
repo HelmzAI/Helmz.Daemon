@@ -401,7 +401,10 @@ internal sealed partial class AgentLoop : IAgentLoop
                 Timestamp = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow),
             };
 
-            // Publish to action stream for mobile to pick up
+            // Store on session so late-connecting StreamActions subscribers can replay it.
+            session.CurrentPendingAction = actionRequest;
+
+            // Publish to action stream for already-connected subscribers.
             await _eventBus.PublishActionAsync(session.SessionId, actionRequest, cancellationToken).ConfigureAwait(false);
 
             LogAwaitingApproval(_logger, session.SessionId, toolUse.Name, actionId);
@@ -419,6 +422,7 @@ internal sealed partial class AgentLoop : IAgentLoop
         }
         finally
         {
+            session.CurrentPendingAction = null;
             session.PendingActions.TryRemove(actionId, out _);
             session.TryTransitionTo(SessionState.Running);
         }

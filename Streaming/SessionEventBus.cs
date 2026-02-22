@@ -67,47 +67,41 @@ internal sealed class SessionEventBus
     }
 
     /// <summary>Publish an output chunk to all subscribers for a session.</summary>
-    public async ValueTask PublishOutputAsync(string sessionId, OutputChunk chunk, CancellationToken cancellationToken = default)
+    public ValueTask PublishOutputAsync(string sessionId, OutputChunk chunk, CancellationToken cancellationToken = default)
     {
         if (!_channels.TryGetValue(sessionId, out var collection))
         {
-            return;
+            return ValueTask.CompletedTask;
         }
 
-        foreach (var (id, channel) in collection.OutputSubscribers)
+        foreach (var (_, channel) in collection.OutputSubscribers)
         {
-            // DropOldest channels: TryWrite only fails if the channel is completed
-            if (!channel.Writer.TryWrite(chunk))
-            {
-                // Dead subscriber — clean up
-                if (collection.OutputSubscribers.TryRemove(id, out var removed))
-                {
-                    removed.Writer.TryComplete();
-                }
-            }
+            // DropOldest mode: TryWrite always returns true (drops oldest item to make
+            // room) unless the channel has been completed. Completed channels are cleaned
+            // up by EventSubscription.Dispose() when the gRPC stream ends — no action
+            // needed here.
+            channel.Writer.TryWrite(chunk);
         }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>Publish an action request to all subscribers for a session.</summary>
-    public async ValueTask PublishActionAsync(string sessionId, ActionRequest action, CancellationToken cancellationToken = default)
+    public ValueTask PublishActionAsync(string sessionId, ActionRequest action, CancellationToken cancellationToken = default)
     {
         if (!_channels.TryGetValue(sessionId, out var collection))
         {
-            return;
+            return ValueTask.CompletedTask;
         }
 
-        foreach (var (id, channel) in collection.ActionSubscribers)
+        foreach (var (_, channel) in collection.ActionSubscribers)
         {
-            // Use TryWrite instead of WriteAsync to avoid blocking on dead subscribers.
-            // A full channel with no active reader is dead — remove it.
-            if (!channel.Writer.TryWrite(action))
-            {
-                if (collection.ActionSubscribers.TryRemove(id, out var removed))
-                {
-                    removed.Writer.TryComplete();
-                }
-            }
+            // Wait mode: TryWrite returns false only if the channel is completed.
+            // Completed channels are cleaned up by EventSubscription.Dispose().
+            channel.Writer.TryWrite(action);
         }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>Complete all channels for a session (signals end-of-stream to all subscribers).</summary>
