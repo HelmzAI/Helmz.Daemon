@@ -51,6 +51,14 @@ internal sealed class AgentSession : IDisposable
     public bool ApproveAll { get; set; }
 
     /// <summary>
+    /// The action request currently waiting for approval, or null if none.
+    /// Stored here so <see cref="DaemonServiceImpl.StreamActions"/> can replay it
+    /// to clients that subscribe after the event was first published to the bus.
+    /// Cleared by <see cref="AgentLoop"/> once a decision is received.
+    /// </summary>
+    public ActionRequest? CurrentPendingAction { get; set; }
+
+    /// <summary>
     /// Transition to a new state. Validates the transition is legal.
     /// </summary>
     /// <exception cref="InvalidOperationException">If the transition is not allowed.</exception>

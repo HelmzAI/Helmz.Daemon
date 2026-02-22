@@ -8,6 +8,7 @@ namespace Helmz.Daemon.Streaming;
 /// Pub/sub event bus for session output and action requests.
 /// Uses System.Threading.Channels for backpressure-aware streaming.
 /// Multiple subscribers can subscribe to the same session.
+/// Subscribers are keyed by ID so they can be removed when the gRPC stream ends.
 /// </summary>
 internal sealed class SessionEventBus
 {
@@ -15,61 +16,92 @@ internal sealed class SessionEventBus
 
     private const int DefaultCapacity = 1000;
 
-    /// <summary>Subscribe to output chunks for a session. Returns a reader to consume from.</summary>
-    public ChannelReader<OutputChunk> SubscribeOutput(string sessionId)
+    /// <summary>
+    /// Subscribe to output chunks for a session.
+    /// Returns a subscription that MUST be disposed when the consumer disconnects.
+    /// </summary>
+    public EventSubscription<OutputChunk> SubscribeOutput(string sessionId)
     {
         var collection = GetOrCreateChannels(sessionId);
+        var id = Guid.NewGuid().ToString("N");
         var channel = Channel.CreateBounded<OutputChunk>(new BoundedChannelOptions(DefaultCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = false,
         });
-        collection.OutputSubscribers.Add(channel);
-        return channel.Reader;
+        collection.OutputSubscribers[id] = channel;
+
+        return new EventSubscription<OutputChunk>(channel.Reader, () =>
+        {
+            if (collection.OutputSubscribers.TryRemove(id, out var removed))
+            {
+                removed.Writer.TryComplete();
+            }
+        });
     }
 
-    /// <summary>Subscribe to action requests for a session. Returns a reader to consume from.</summary>
-    public ChannelReader<ActionRequest> SubscribeActions(string sessionId)
+    /// <summary>
+    /// Subscribe to action requests for a session.
+    /// Returns a subscription that MUST be disposed when the consumer disconnects.
+    /// </summary>
+    public EventSubscription<ActionRequest> SubscribeActions(string sessionId)
     {
         var collection = GetOrCreateChannels(sessionId);
+        var id = Guid.NewGuid().ToString("N");
         var channel = Channel.CreateBounded<ActionRequest>(new BoundedChannelOptions(DefaultCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false,
         });
-        collection.ActionSubscribers.Add(channel);
-        return channel.Reader;
+        collection.ActionSubscribers[id] = channel;
+
+        return new EventSubscription<ActionRequest>(channel.Reader, () =>
+        {
+            if (collection.ActionSubscribers.TryRemove(id, out var removed))
+            {
+                removed.Writer.TryComplete();
+            }
+        });
     }
 
     /// <summary>Publish an output chunk to all subscribers for a session.</summary>
-    public async ValueTask PublishOutputAsync(string sessionId, OutputChunk chunk, CancellationToken cancellationToken = default)
+    public ValueTask PublishOutputAsync(string sessionId, OutputChunk chunk, CancellationToken cancellationToken = default)
     {
         if (!_channels.TryGetValue(sessionId, out var collection))
         {
-            return;
+            return ValueTask.CompletedTask;
         }
 
-        foreach (var channel in collection.OutputSubscribers)
+        foreach (var (_, channel) in collection.OutputSubscribers)
         {
-            // TryWrite + DropOldest ensures we never block on slow consumers
-            await channel.Writer.WriteAsync(chunk, cancellationToken).ConfigureAwait(false);
+            // DropOldest mode: TryWrite always returns true (drops oldest item to make
+            // room) unless the channel has been completed. Completed channels are cleaned
+            // up by EventSubscription.Dispose() when the gRPC stream ends — no action
+            // needed here.
+            channel.Writer.TryWrite(chunk);
         }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>Publish an action request to all subscribers for a session.</summary>
-    public async ValueTask PublishActionAsync(string sessionId, ActionRequest action, CancellationToken cancellationToken = default)
+    public ValueTask PublishActionAsync(string sessionId, ActionRequest action, CancellationToken cancellationToken = default)
     {
         if (!_channels.TryGetValue(sessionId, out var collection))
         {
-            return;
+            return ValueTask.CompletedTask;
         }
 
-        foreach (var channel in collection.ActionSubscribers)
+        foreach (var (_, channel) in collection.ActionSubscribers)
         {
-            await channel.Writer.WriteAsync(action, cancellationToken).ConfigureAwait(false);
+            // Wait mode: TryWrite returns false only if the channel is completed.
+            // Completed channels are cleaned up by EventSubscription.Dispose().
+            channel.Writer.TryWrite(action);
         }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>Complete all channels for a session (signals end-of-stream to all subscribers).</summary>
@@ -80,12 +112,12 @@ internal sealed class SessionEventBus
             return;
         }
 
-        foreach (var channel in collection.OutputSubscribers)
+        foreach (var (_, channel) in collection.OutputSubscribers)
         {
             channel.Writer.TryComplete();
         }
 
-        foreach (var channel in collection.ActionSubscribers)
+        foreach (var (_, channel) in collection.ActionSubscribers)
         {
             channel.Writer.TryComplete();
         }
@@ -99,7 +131,31 @@ internal sealed class SessionEventBus
     /// <summary>Holds all subscriber channels for a single session.</summary>
     private sealed class ChannelCollection
     {
-        public ConcurrentBag<Channel<OutputChunk>> OutputSubscribers { get; } = [];
-        public ConcurrentBag<Channel<ActionRequest>> ActionSubscribers { get; } = [];
+        public ConcurrentDictionary<string, Channel<OutputChunk>> OutputSubscribers { get; } = new();
+        public ConcurrentDictionary<string, Channel<ActionRequest>> ActionSubscribers { get; } = new();
+    }
+}
+
+/// <summary>
+/// A subscription to an event bus channel. Dispose to unsubscribe and clean up.
+/// </summary>
+internal sealed class EventSubscription<T> : IDisposable
+{
+    private readonly Action _onDispose;
+    private bool _disposed;
+
+    public ChannelReader<T> Reader { get; }
+
+    public EventSubscription(ChannelReader<T> reader, Action onDispose)
+    {
+        Reader = reader;
+        _onDispose = onDispose;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _onDispose();
     }
 }

@@ -14,7 +14,7 @@ internal sealed class DaemonOptions
     public int MaxConcurrentSessions { get; set; } = 5;
 
     /// <summary>Default Claude model to use.</summary>
-    public string DefaultModel { get; set; } = "claude-sonnet-4-6";
+    public string DefaultModel { get; set; } = "claude-opus-4-6";
 
     /// <summary>Maximum tokens per API response.</summary>
     public int MaxTokens { get; set; } = 16384;
