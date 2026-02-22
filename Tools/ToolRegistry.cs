@@ -29,12 +29,12 @@ internal sealed class ToolRegistry
     /// <summary>Get all tool definitions for the Anthropic API request.</summary>
     public IReadOnlyList<ToolDefinition> GetToolDefinitions()
     {
-        return _tools.Values.Select(tool => new ToolDefinition
+        return [.. _tools.Values.Select(tool => new ToolDefinition
         {
             Name = tool.Name,
             Description = tool.Description,
             InputSchema = tool.InputSchema,
-        }).ToList();
+        })];
     }
 
     /// <summary>Get all registered tool names.</summary>
@@ -49,7 +49,7 @@ internal sealed class ToolRegistry
     /// <summary>Parse a JSON schema string into a JsonElement.</summary>
     public static JsonElement ParseSchema(string json)
     {
-        using var doc = JsonDocument.Parse(json);
+        using JsonDocument doc = JsonDocument.Parse(json);
         return doc.RootElement.Clone();
     }
 }

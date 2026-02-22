@@ -15,7 +15,7 @@ internal sealed class GrepTool : ITool
 
     public string Description => "Search file contents using a regex pattern. Optionally filter files by glob. Returns matching lines with file paths and line numbers.";
 
-    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema("""
+    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema(/*lang=json,strict*/ """
         {
             "type": "object",
             "properties": {
@@ -40,10 +40,10 @@ internal sealed class GrepTool : ITool
 
     public async Task<ToolResult> ExecuteAsync(JsonElement input, string workingDirectory, CancellationToken cancellationToken)
     {
-        var pattern = input.GetProperty("pattern").GetString()
+        string pattern = input.GetProperty("pattern").GetString()
             ?? throw new InvalidOperationException("pattern is required");
 
-        var searchPath = input.TryGetProperty("path", out var pathProp)
+        string searchPath = input.TryGetProperty("path", out JsonElement pathProp)
             ? pathProp.GetString() ?? workingDirectory
             : workingDirectory;
 
@@ -57,7 +57,7 @@ internal sealed class GrepTool : ITool
             return new ToolResult($"Directory not found: {searchPath}", IsError: true);
         }
 
-        var fileGlob = input.TryGetProperty("file_glob", out var globProp)
+        string fileGlob = input.TryGetProperty("file_glob", out JsonElement globProp)
             ? globProp.GetString() ?? "**/*"
             : "**/*";
 
@@ -71,12 +71,12 @@ internal sealed class GrepTool : ITool
             return new ToolResult($"Invalid regex: {ex.Message}", IsError: true);
         }
 
-        var matcher = new Matcher();
-        matcher.AddInclude(fileGlob);
-        var files = matcher.GetResultsInFullPath(searchPath).OrderBy(f => f, StringComparer.Ordinal);
+        Matcher matcher = new();
+        _ = matcher.AddInclude(fileGlob);
+        IOrderedEnumerable<string> files = matcher.GetResultsInFullPath(searchPath).OrderBy(f => f, StringComparer.Ordinal);
 
-        var results = new List<string>();
-        foreach (var file in files)
+        List<string> results = [];
+        foreach (string file in files)
         {
             if (cancellationToken.IsCancellationRequested)
             {
@@ -85,7 +85,7 @@ internal sealed class GrepTool : ITool
 
             try
             {
-                var lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
+                string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
                 for (int i = 0; i < lines.Length; i++)
                 {
                     if (regex.IsMatch(lines[i]))
@@ -105,11 +105,8 @@ internal sealed class GrepTool : ITool
             }
         }
 
-        if (results.Count == 0)
-        {
-            return new ToolResult("No matches found.");
-        }
-
-        return new ToolResult(string.Join('\n', results));
+        return results.Count == 0
+            ? new ToolResult("No matches found.")
+            : new ToolResult(string.Join('\n', results));
     }
 }

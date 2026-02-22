@@ -8,9 +8,10 @@ namespace Helmz.Daemon.Sessions;
 /// Represents an active agent session. Holds conversation history,
 /// state machine, pending approval actions, and the tool registry.
 /// </summary>
+#pragma warning disable IDE0290 // Use primary constructor — this class has mutable state (_stateLock, _disposed) requiring traditional fields
 internal sealed class AgentSession : IDisposable
 {
-    private readonly object _stateLock = new();
+    private readonly Lock _stateLock = new();
     private bool _disposed;
 
     public AgentSession(
@@ -52,9 +53,9 @@ internal sealed class AgentSession : IDisposable
 
     /// <summary>
     /// The action request currently waiting for approval, or null if none.
-    /// Stored here so <see cref="DaemonServiceImpl.StreamActions"/> can replay it
+    /// Stored here so DaemonServiceImpl.StreamActions can replay it
     /// to clients that subscribe after the event was first published to the bus.
-    /// Cleared by <see cref="AgentLoop"/> once a decision is received.
+    /// Cleared by AgentLoop once a decision is received.
     /// </summary>
     public ActionRequest? CurrentPendingAction { get; set; }
 
@@ -103,9 +104,9 @@ internal sealed class AgentSession : IDisposable
         _disposed = true;
 
         // Cancel any pending approvals
-        foreach (var (_, tcs) in PendingActions)
+        foreach ((string _, TaskCompletionSource<ActionDecision>? tcs) in PendingActions)
         {
-            tcs.TrySetCanceled();
+            _ = tcs.TrySetCanceled();
         }
 
         PendingActions.Clear();
@@ -132,7 +133,11 @@ internal sealed class AgentSession : IDisposable
                 or SessionState.Failed,
             SessionState.WaitingForInput => to is SessionState.Running or SessionState.Failed,
             SessionState.WaitingForApproval => to is SessionState.Running or SessionState.Failed,
-            _ => false, // Completed and Failed are terminal
+            SessionState.Unspecified
+                or SessionState.Completed
+                or SessionState.Failed
+                or _ => false, // Completed, Failed, and Unspecified are terminal
         };
     }
 }
+#pragma warning restore IDE0290

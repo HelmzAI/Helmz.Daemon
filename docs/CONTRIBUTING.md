@@ -57,6 +57,12 @@ refactor(session): extract session state machine
 test(cli): add output parsing tests
 ```
 
+## Code Quality
+
+All Roslyn IDE suggestions are enforced as build errors. Run `dotnet format` before committing to auto-fix violations.
+
+See the [parent repo's contributing guide](https://github.com/HelmzAI/Helmz/blob/main/docs/CONTRIBUTING.md#code-quality) for the full list of enforced rules.
+
 ## Merging
 
 - **Always squash merge** PRs into `main`.

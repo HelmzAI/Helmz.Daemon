@@ -11,7 +11,7 @@ internal sealed class ReadFileTool : ITool
 
     public string Description => "Read the contents of a file. Supports optional line range (start_line and end_line, 1-indexed).";
 
-    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema("""
+    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema(/*lang=json,strict*/ """
         {
             "type": "object",
             "properties": {
@@ -36,20 +36,20 @@ internal sealed class ReadFileTool : ITool
 
     public async Task<ToolResult> ExecuteAsync(JsonElement input, string workingDirectory, CancellationToken cancellationToken)
     {
-        var path = input.GetProperty("path").GetString()
+        string path = input.GetProperty("path").GetString()
             ?? throw new InvalidOperationException("path is required");
 
-        var fullPath = Path.IsPathRooted(path) ? path : Path.Combine(workingDirectory, path);
+        string fullPath = Path.IsPathRooted(path) ? path : Path.Combine(workingDirectory, path);
 
         if (!File.Exists(fullPath))
         {
             return new ToolResult($"File not found: {fullPath}", IsError: true);
         }
 
-        var lines = await File.ReadAllLinesAsync(fullPath, cancellationToken).ConfigureAwait(false);
+        string[] lines = await File.ReadAllLinesAsync(fullPath, cancellationToken).ConfigureAwait(false);
 
-        int startLine = input.TryGetProperty("start_line", out var startProp) ? startProp.GetInt32() : 1;
-        int endLine = input.TryGetProperty("end_line", out var endProp) ? endProp.GetInt32() : lines.Length;
+        int startLine = input.TryGetProperty("start_line", out JsonElement startProp) ? startProp.GetInt32() : 1;
+        int endLine = input.TryGetProperty("end_line", out JsonElement endProp) ? endProp.GetInt32() : lines.Length;
 
         startLine = Math.Max(1, startLine);
         endLine = Math.Min(lines.Length, endLine);
@@ -59,8 +59,8 @@ internal sealed class ReadFileTool : ITool
             return new ToolResult($"Invalid line range: {startLine}-{endLine}", IsError: true);
         }
 
-        var selectedLines = lines.Skip(startLine - 1).Take(endLine - startLine + 1);
-        var numbered = selectedLines.Select((line, i) => $"{startLine + i,6}\t{line}");
+        IEnumerable<string> selectedLines = lines.Skip(startLine - 1).Take(endLine - startLine + 1);
+        IEnumerable<string> numbered = selectedLines.Select((line, i) => $"{startLine + i,6}\t{line}");
         return new ToolResult(string.Join('\n', numbered));
     }
 }

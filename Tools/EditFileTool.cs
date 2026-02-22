@@ -11,7 +11,7 @@ internal sealed class EditFileTool : ITool
 
     public string Description => "Replace an exact string in a file with new content. The old_string must be unique in the file.";
 
-    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema("""
+    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema(/*lang=json,strict*/ """
         {
             "type": "object",
             "properties": {
@@ -36,22 +36,22 @@ internal sealed class EditFileTool : ITool
 
     public async Task<ToolResult> ExecuteAsync(JsonElement input, string workingDirectory, CancellationToken cancellationToken)
     {
-        var path = input.GetProperty("path").GetString()
+        string path = input.GetProperty("path").GetString()
             ?? throw new InvalidOperationException("path is required");
-        var oldString = input.GetProperty("old_string").GetString()
+        string oldString = input.GetProperty("old_string").GetString()
             ?? throw new InvalidOperationException("old_string is required");
-        var newString = input.GetProperty("new_string").GetString() ?? "";
+        string newString = input.GetProperty("new_string").GetString() ?? "";
 
-        var fullPath = Path.IsPathRooted(path) ? path : Path.Combine(workingDirectory, path);
+        string fullPath = Path.IsPathRooted(path) ? path : Path.Combine(workingDirectory, path);
 
         if (!File.Exists(fullPath))
         {
             return new ToolResult($"File not found: {fullPath}", IsError: true);
         }
 
-        var content = await File.ReadAllTextAsync(fullPath, cancellationToken).ConfigureAwait(false);
+        string content = await File.ReadAllTextAsync(fullPath, cancellationToken).ConfigureAwait(false);
 
-        var occurrences = CountOccurrences(content, oldString);
+        int occurrences = CountOccurrences(content, oldString);
         if (occurrences == 0)
         {
             return new ToolResult("old_string not found in file.", IsError: true);
@@ -62,7 +62,7 @@ internal sealed class EditFileTool : ITool
             return new ToolResult($"old_string found {occurrences} times. It must be unique. Provide more context.", IsError: true);
         }
 
-        var updated = content.Replace(oldString, newString, StringComparison.Ordinal);
+        string updated = content.Replace(oldString, newString, StringComparison.Ordinal);
         await File.WriteAllTextAsync(fullPath, updated, cancellationToken).ConfigureAwait(false);
         return new ToolResult($"Edited {fullPath}");
     }

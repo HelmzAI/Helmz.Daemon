@@ -11,7 +11,7 @@ internal sealed class WriteFileTool : ITool
 
     public string Description => "Write content to a file. Creates parent directories if they don't exist. Overwrites existing files.";
 
-    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema("""
+    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema(/*lang=json,strict*/ """
         {
             "type": "object",
             "properties": {
@@ -32,16 +32,16 @@ internal sealed class WriteFileTool : ITool
 
     public async Task<ToolResult> ExecuteAsync(JsonElement input, string workingDirectory, CancellationToken cancellationToken)
     {
-        var path = input.GetProperty("path").GetString()
+        string path = input.GetProperty("path").GetString()
             ?? throw new InvalidOperationException("path is required");
-        var content = input.GetProperty("content").GetString() ?? "";
+        string content = input.GetProperty("content").GetString() ?? "";
 
-        var fullPath = Path.IsPathRooted(path) ? path : Path.Combine(workingDirectory, path);
+        string fullPath = Path.IsPathRooted(path) ? path : Path.Combine(workingDirectory, path);
 
-        var directory = Path.GetDirectoryName(fullPath);
+        string? directory = Path.GetDirectoryName(fullPath);
         if (!string.IsNullOrEmpty(directory))
         {
-            Directory.CreateDirectory(directory);
+            _ = Directory.CreateDirectory(directory);
         }
 
         await File.WriteAllTextAsync(fullPath, content, cancellationToken).ConfigureAwait(false);

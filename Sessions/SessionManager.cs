@@ -4,7 +4,6 @@ using Helmz.Daemon.Configuration;
 using Helmz.Daemon.Streaming;
 using Helmz.Daemon.Tools;
 using Helmz.Spec.V1;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Helmz.Daemon.Sessions;
@@ -13,13 +12,17 @@ namespace Helmz.Daemon.Sessions;
 /// Manages the lifecycle of agent sessions using a ConcurrentDictionary.
 /// Delegates agent loop execution to IAgentLoop.
 /// </summary>
-internal sealed partial class SessionManager : ISessionManager, IDisposable
+internal sealed partial class SessionManager(
+    IAgentLoop agentLoop,
+    SessionEventBus eventBus,
+    IOptions<DaemonOptions> options,
+    ILogger<SessionManager> logger) : ISessionManager, IDisposable
 {
     private readonly ConcurrentDictionary<string, AgentSession> _sessions = new(StringComparer.Ordinal);
-    private readonly IAgentLoop _agentLoop;
-    private readonly SessionEventBus _eventBus;
-    private readonly DaemonOptions _options;
-    private readonly ILogger<SessionManager> _logger;
+    private readonly IAgentLoop _agentLoop = agentLoop;
+    private readonly SessionEventBus _eventBus = eventBus;
+    private readonly DaemonOptions _options = options.Value;
+    private readonly ILogger<SessionManager> _logger = logger;
     private bool _disposed;
 
     // Built-in tools to register on each session
@@ -32,18 +35,6 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
         new GlobTool(),
         new GrepTool(),
     ];
-
-    public SessionManager(
-        IAgentLoop agentLoop,
-        SessionEventBus eventBus,
-        IOptions<DaemonOptions> options,
-        ILogger<SessionManager> logger)
-    {
-        _agentLoop = agentLoop;
-        _eventBus = eventBus;
-        _options = options.Value;
-        _logger = logger;
-    }
 
     public Task<AgentSession> StartSessionAsync(
         AgentProvider provider, string workingDirectory, string initialPrompt, CancellationToken cancellationToken)
@@ -61,16 +52,16 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
             throw new ArgumentException($"Working directory does not exist: {workingDirectory}", nameof(workingDirectory));
         }
 
-        var sessionId = Guid.NewGuid().ToString("N");
+        string sessionId = Guid.NewGuid().ToString("N");
 
         // Create tool registry with built-in tools
-        var toolRegistry = new ToolRegistry();
-        foreach (var tool in BuiltInTools)
+        ToolRegistry toolRegistry = new();
+        foreach (ITool tool in BuiltInTools)
         {
             toolRegistry.Register(tool);
         }
 
-        var session = new AgentSession(sessionId, provider, workingDirectory, toolRegistry);
+        AgentSession session = new(sessionId, provider, workingDirectory, toolRegistry);
 
         if (!_sessions.TryAdd(sessionId, session))
         {
@@ -88,14 +79,14 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
 
     public Task StopSessionAsync(string sessionId, CancellationToken cancellationToken)
     {
-        if (!_sessions.TryRemove(sessionId, out var session))
+        if (!_sessions.TryRemove(sessionId, out AgentSession? session))
         {
             throw new KeyNotFoundException($"Session not found: {sessionId}");
         }
 
         LogSessionStopped(_logger, sessionId);
 
-        session.TryTransitionTo(SessionState.Failed);
+        _ = session.TryTransitionTo(SessionState.Failed);
         session.Dispose();
         _eventBus.CompleteSession(sessionId);
 
@@ -104,7 +95,7 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
 
     public IReadOnlyList<AgentSession> ListSessions()
     {
-        return _sessions.Values.ToList();
+        return [.. _sessions.Values];
     }
 
     public AgentSession? GetSession(string sessionId)
@@ -114,7 +105,7 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
 
     public Task SendCommandAsync(string sessionId, string command, CancellationToken cancellationToken)
     {
-        var session = _sessions.GetValueOrDefault(sessionId)
+        AgentSession session = _sessions.GetValueOrDefault(sessionId)
             ?? throw new KeyNotFoundException($"Session not found: {sessionId}");
 
         if (session.State != SessionState.WaitingForInput)
@@ -133,17 +124,17 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
 
     public Task RespondToActionAsync(string sessionId, string actionId, ActionDecision decision, CancellationToken cancellationToken)
     {
-        var session = _sessions.GetValueOrDefault(sessionId)
+        AgentSession session = _sessions.GetValueOrDefault(sessionId)
             ?? throw new KeyNotFoundException($"Session not found: {sessionId}");
 
-        if (!session.PendingActions.TryGetValue(actionId, out var tcs))
+        if (!session.PendingActions.TryGetValue(actionId, out TaskCompletionSource<ActionDecision>? tcs))
         {
             throw new KeyNotFoundException($"Action not found: {actionId}");
         }
 
         LogActionResponse(_logger, sessionId, actionId, decision.ToString());
 
-        tcs.TrySetResult(decision);
+        _ = tcs.TrySetResult(decision);
         return Task.CompletedTask;
     }
 
@@ -156,7 +147,7 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
 
         _disposed = true;
 
-        foreach (var (id, session) in _sessions)
+        foreach ((string? id, AgentSession? session) in _sessions)
         {
             session.Dispose();
             _eventBus.CompleteSession(id);
@@ -178,17 +169,17 @@ internal sealed partial class SessionManager : ISessionManager, IDisposable
         catch (HttpRequestException ex)
         {
             LogSessionError(_logger, session.SessionId, ex.Message);
-            session.TryTransitionTo(SessionState.Failed);
+            _ = session.TryTransitionTo(SessionState.Failed);
         }
         catch (InvalidOperationException ex)
         {
             LogSessionError(_logger, session.SessionId, ex.Message);
-            session.TryTransitionTo(SessionState.Failed);
+            _ = session.TryTransitionTo(SessionState.Failed);
         }
         catch (TimeoutException ex)
         {
             LogSessionError(_logger, session.SessionId, ex.Message);
-            session.TryTransitionTo(SessionState.Failed);
+            _ = session.TryTransitionTo(SessionState.Failed);
         }
     }
 

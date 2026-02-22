@@ -9,7 +9,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 // Search up from CWD to find .env at the repo root
 DotEnv.Load(new DotEnvOptions(probeForEnv: true));
 
-var builder = WebApplication.CreateBuilder(args);
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Register daemon services
 builder.Services.AddHelmzCore(builder.Configuration);
@@ -18,7 +18,7 @@ builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
 
 // Configure Kestrel for gRPC (HTTP/2)
-var daemonPort = builder.Configuration
+int daemonPort = builder.Configuration
     .GetSection(DaemonOptions.SectionName)
     .GetValue("GrpcPort", 50051);
 
@@ -30,7 +30,7 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 
-var app = builder.Build();
+WebApplication app = builder.Build();
 
 // Map gRPC service
 app.MapGrpcService<DaemonServiceImpl>();

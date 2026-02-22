@@ -22,9 +22,9 @@ internal sealed class SessionEventBus
     /// </summary>
     public EventSubscription<OutputChunk> SubscribeOutput(string sessionId)
     {
-        var collection = GetOrCreateChannels(sessionId);
-        var id = Guid.NewGuid().ToString("N");
-        var channel = Channel.CreateBounded<OutputChunk>(new BoundedChannelOptions(DefaultCapacity)
+        ChannelCollection collection = GetOrCreateChannels(sessionId);
+        string id = Guid.NewGuid().ToString("N");
+        Channel<OutputChunk> channel = Channel.CreateBounded<OutputChunk>(new BoundedChannelOptions(DefaultCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
@@ -34,9 +34,9 @@ internal sealed class SessionEventBus
 
         return new EventSubscription<OutputChunk>(channel.Reader, () =>
         {
-            if (collection.OutputSubscribers.TryRemove(id, out var removed))
+            if (collection.OutputSubscribers.TryRemove(id, out Channel<OutputChunk>? removed))
             {
-                removed.Writer.TryComplete();
+                _ = removed.Writer.TryComplete();
             }
         });
     }
@@ -47,9 +47,9 @@ internal sealed class SessionEventBus
     /// </summary>
     public EventSubscription<ActionRequest> SubscribeActions(string sessionId)
     {
-        var collection = GetOrCreateChannels(sessionId);
-        var id = Guid.NewGuid().ToString("N");
-        var channel = Channel.CreateBounded<ActionRequest>(new BoundedChannelOptions(DefaultCapacity)
+        ChannelCollection collection = GetOrCreateChannels(sessionId);
+        string id = Guid.NewGuid().ToString("N");
+        Channel<ActionRequest> channel = Channel.CreateBounded<ActionRequest>(new BoundedChannelOptions(DefaultCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -59,46 +59,46 @@ internal sealed class SessionEventBus
 
         return new EventSubscription<ActionRequest>(channel.Reader, () =>
         {
-            if (collection.ActionSubscribers.TryRemove(id, out var removed))
+            if (collection.ActionSubscribers.TryRemove(id, out Channel<ActionRequest>? removed))
             {
-                removed.Writer.TryComplete();
+                _ = removed.Writer.TryComplete();
             }
         });
     }
 
     /// <summary>Publish an output chunk to all subscribers for a session.</summary>
-    public ValueTask PublishOutputAsync(string sessionId, OutputChunk chunk, CancellationToken cancellationToken = default)
+    public ValueTask PublishOutputAsync(string sessionId, OutputChunk chunk)
     {
-        if (!_channels.TryGetValue(sessionId, out var collection))
+        if (!_channels.TryGetValue(sessionId, out ChannelCollection? collection))
         {
             return ValueTask.CompletedTask;
         }
 
-        foreach (var (_, channel) in collection.OutputSubscribers)
+        foreach ((string _, Channel<OutputChunk>? channel) in collection.OutputSubscribers)
         {
             // DropOldest mode: TryWrite always returns true (drops oldest item to make
             // room) unless the channel has been completed. Completed channels are cleaned
             // up by EventSubscription.Dispose() when the gRPC stream ends — no action
             // needed here.
-            channel.Writer.TryWrite(chunk);
+            _ = channel.Writer.TryWrite(chunk);
         }
 
         return ValueTask.CompletedTask;
     }
 
     /// <summary>Publish an action request to all subscribers for a session.</summary>
-    public ValueTask PublishActionAsync(string sessionId, ActionRequest action, CancellationToken cancellationToken = default)
+    public ValueTask PublishActionAsync(string sessionId, ActionRequest action)
     {
-        if (!_channels.TryGetValue(sessionId, out var collection))
+        if (!_channels.TryGetValue(sessionId, out ChannelCollection? collection))
         {
             return ValueTask.CompletedTask;
         }
 
-        foreach (var (_, channel) in collection.ActionSubscribers)
+        foreach ((string _, Channel<ActionRequest>? channel) in collection.ActionSubscribers)
         {
             // Wait mode: TryWrite returns false only if the channel is completed.
             // Completed channels are cleaned up by EventSubscription.Dispose().
-            channel.Writer.TryWrite(action);
+            _ = channel.Writer.TryWrite(action);
         }
 
         return ValueTask.CompletedTask;
@@ -107,19 +107,19 @@ internal sealed class SessionEventBus
     /// <summary>Complete all channels for a session (signals end-of-stream to all subscribers).</summary>
     public void CompleteSession(string sessionId)
     {
-        if (!_channels.TryRemove(sessionId, out var collection))
+        if (!_channels.TryRemove(sessionId, out ChannelCollection? collection))
         {
             return;
         }
 
-        foreach (var (_, channel) in collection.OutputSubscribers)
+        foreach ((string _, Channel<OutputChunk>? channel) in collection.OutputSubscribers)
         {
-            channel.Writer.TryComplete();
+            _ = channel.Writer.TryComplete();
         }
 
-        foreach (var (_, channel) in collection.ActionSubscribers)
+        foreach ((string _, Channel<ActionRequest>? channel) in collection.ActionSubscribers)
         {
-            channel.Writer.TryComplete();
+            _ = channel.Writer.TryComplete();
         }
     }
 
@@ -139,22 +139,19 @@ internal sealed class SessionEventBus
 /// <summary>
 /// A subscription to an event bus channel. Dispose to unsubscribe and clean up.
 /// </summary>
-internal sealed class EventSubscription<T> : IDisposable
+internal sealed class EventSubscription<T>(ChannelReader<T> reader, Action onDispose) : IDisposable
 {
-    private readonly Action _onDispose;
+    private readonly Action _onDispose = onDispose;
     private bool _disposed;
 
-    public ChannelReader<T> Reader { get; }
-
-    public EventSubscription(ChannelReader<T> reader, Action onDispose)
-    {
-        Reader = reader;
-        _onDispose = onDispose;
-    }
+    public ChannelReader<T> Reader { get; } = reader;
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
         _disposed = true;
         _onDispose();
     }

@@ -12,24 +12,19 @@ namespace Helmz.Daemon.Services;
 /// Delegates all operations to ISessionManager + SessionEventBus.
 /// For local dev testing — in production, these RPCs are tunneled via relay.
 /// </summary>
-internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
+internal sealed class DaemonServiceImpl(ISessionManager sessionManager, SessionEventBus eventBus)
+    : DaemonService.DaemonServiceBase
 {
     private static readonly string Version = typeof(DaemonServiceImpl).Assembly
         .GetName().Version?.ToString() ?? "0.0.1";
 
-    private readonly ISessionManager _sessionManager;
-    private readonly SessionEventBus _eventBus;
-
-    public DaemonServiceImpl(ISessionManager sessionManager, SessionEventBus eventBus)
-    {
-        _sessionManager = sessionManager;
-        _eventBus = eventBus;
-    }
+    private readonly ISessionManager _sessionManager = sessionManager;
+    private readonly SessionEventBus _eventBus = eventBus;
 
     public override Task<GetDaemonInfoResponse> GetDaemonInfo(
         GetDaemonInfoRequest request, ServerCallContext context)
     {
-        var response = new GetDaemonInfoResponse
+        GetDaemonInfoResponse response = new()
         {
             Version = Version,
             Os = RuntimeInformation.OSDescription,
@@ -50,7 +45,7 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
 
         try
         {
-            var session = await _sessionManager.StartSessionAsync(
+            AgentSession session = await _sessionManager.StartSessionAsync(
                 request.Provider,
                 request.WorkingDirectory,
                 request.InitialPrompt,
@@ -88,8 +83,8 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
     public override Task<ListSessionsResponse> ListSessions(
         ListSessionsRequest request, ServerCallContext context)
     {
-        var sessions = _sessionManager.ListSessions();
-        var response = new ListSessionsResponse();
+        IReadOnlyList<AgentSession> sessions = _sessionManager.ListSessions();
+        ListSessionsResponse response = new();
         response.Sessions.AddRange(sessions.Select(ToSessionInfo));
         return Task.FromResult(response);
     }
@@ -123,11 +118,11 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
         IServerStreamWriter<StreamOutputResponse> responseStream,
         ServerCallContext context)
     {
-        using var subscription = _eventBus.SubscribeOutput(request.SessionId);
+        using EventSubscription<OutputChunk> subscription = _eventBus.SubscribeOutput(request.SessionId);
 
         try
         {
-            await foreach (var chunk in subscription.Reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
+            await foreach (OutputChunk? chunk in subscription.Reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
             {
                 await responseStream.WriteAsync(
                     new StreamOutputResponse { Chunk = chunk },
@@ -148,10 +143,10 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
     {
         // Subscribe first, then check for a missed action — this ordering ensures
         // we cannot miss an action that arrives between the two steps.
-        using var subscription = _eventBus.SubscribeActions(request.SessionId);
+        using EventSubscription<ActionRequest> subscription = _eventBus.SubscribeActions(request.SessionId);
 
         // Replay any action that was published before this subscriber connected.
-        var session = _sessionManager.GetSession(request.SessionId);
+        AgentSession? session = _sessionManager.GetSession(request.SessionId);
         if (session?.CurrentPendingAction is { } missed)
         {
             await responseStream.WriteAsync(
@@ -161,7 +156,7 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
 
         try
         {
-            await foreach (var action in subscription.Reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
+            await foreach (ActionRequest? action in subscription.Reader.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
             {
                 await responseStream.WriteAsync(
                     new StreamActionsResponse { Action = action },
@@ -201,7 +196,7 @@ internal sealed class DaemonServiceImpl : DaemonService.DaemonServiceBase
     public override Task<GetSessionStatusResponse> GetSessionStatus(
         GetSessionStatusRequest request, ServerCallContext context)
     {
-        var session = _sessionManager.GetSession(request.SessionId)
+        AgentSession session = _sessionManager.GetSession(request.SessionId)
             ?? throw new RpcException(new Status(StatusCode.NotFound, $"Session not found: {request.SessionId}"));
 
         return Task.FromResult(new GetSessionStatusResponse
