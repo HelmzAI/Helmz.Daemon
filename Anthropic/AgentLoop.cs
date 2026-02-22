@@ -113,16 +113,38 @@ internal sealed partial class AgentLoop(
 
         int? budget = session.ThinkingBudgetTokens;
         int compactionTrigger = _options.CompactionTriggerTokens;
+        string model = session.Model ?? _options.DefaultModel;
+        int modelCap = GetModelMaxOutputTokens(model);
+
+        // max_tokens covers both thinking + output and must not exceed the model cap
+        int maxTokens;
+        int? effectiveBudget = budget;
+
+        if (budget.HasValue)
+        {
+            maxTokens = Math.Min(budget.Value + _options.MaxTokens, modelCap);
+
+            // Ensure budget < max_tokens (API requirement) — leave room for output
+            if (budget.Value >= maxTokens)
+            {
+                effectiveBudget = maxTokens - 4096;
+            }
+        }
+        else
+        {
+            maxTokens = _options.MaxTokens;
+        }
+
         return new MessageRequest
         {
-            Model = session.Model ?? _options.DefaultModel,
-            MaxTokens = _options.MaxTokens,
+            Model = model,
+            MaxTokens = maxTokens,
             System = _options.SystemPrompt,
             Messages = messages,
             Tools = session.ToolRegistry.GetToolDefinitions(),
             Stream = true,
-            Thinking = budget.HasValue
-                ? new AnthropicThinkingConfig { BudgetTokens = budget.Value }
+            Thinking = effectiveBudget.HasValue
+                ? new AnthropicThinkingConfig { BudgetTokens = effectiveBudget.Value }
                 : null,
             ContextManagement = compactionTrigger > 0
                 ? new ContextManagement
@@ -526,6 +548,17 @@ internal sealed partial class AgentLoop(
         return $"{preview}\n\n" +
             $"[output truncated — full output ({fullContent.Length:N0} chars) saved to {tempPath}]\n" +
             $"Use read_file with offset/limit, or bash tools (head, tail, grep, sed) to read specific sections.";
+    }
+
+    /// <summary>Returns the model's maximum allowed output tokens.</summary>
+    private static int GetModelMaxOutputTokens(string model)
+    {
+        return model switch
+        {
+            string m when m.Contains("opus", StringComparison.OrdinalIgnoreCase) => 128_000,
+            string m when m.Contains("sonnet", StringComparison.OrdinalIgnoreCase) => 64_000,
+            _ => 64_000, // safe default
+        };
     }
 
     private static string Truncate(string value, int maxLength)
