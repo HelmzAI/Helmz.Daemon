@@ -18,7 +18,9 @@ internal sealed class AgentSession : IDisposable
         string sessionId,
         AgentProvider provider,
         string workingDirectory,
-        ToolRegistry toolRegistry)
+        ToolRegistry toolRegistry,
+        int? thinkingBudgetTokens = null,
+        string? model = null)
     {
         SessionId = sessionId;
         Provider = provider;
@@ -30,6 +32,8 @@ internal sealed class AgentSession : IDisposable
         PendingActions = new ConcurrentDictionary<string, TaskCompletionSource<ActionDecision>>(StringComparer.Ordinal);
         CancellationTokenSource = new CancellationTokenSource();
         ApproveAll = false;
+        ThinkingBudgetTokens = thinkingBudgetTokens;
+        Model = model;
     }
 
     public string SessionId { get; }
@@ -58,6 +62,52 @@ internal sealed class AgentSession : IDisposable
     /// Cleared by AgentLoop once a decision is received.
     /// </summary>
     public ActionRequest? CurrentPendingAction { get; set; }
+
+    /// <summary>
+    /// Per-turn CancellationTokenSource, linked to the session CTS.
+    /// Reset at the start of each turn via <see cref="ResetTurnCts"/>.
+    /// Cancelled on <see cref="InterruptCurrentTurn"/> without killing the session.
+    /// </summary>
+    public CancellationTokenSource? TurnCts { get; private set; }
+
+    /// <summary>
+    /// Thinking budget in tokens. Null means thinking is disabled for this session.
+    /// Each agent provider maps this to its native API format.
+    /// </summary>
+    public int? ThinkingBudgetTokens { get; set; }
+
+    /// <summary>
+    /// The model to use for API requests. Null = use global default (DaemonOptions.DefaultModel).
+    /// Mutable — can be changed mid-session via SendCommand.
+    /// </summary>
+    public string? Model { get; set; }
+
+    /// <summary>Messages queued while the agent is running. Dequeued automatically after each turn.</summary>
+    public ConcurrentQueue<string> MessageQueue { get; } = new();
+
+    /// <summary>Create a new turn-level CTS linked to the session CTS.</summary>
+    public CancellationTokenSource ResetTurnCts()
+    {
+        TurnCts?.Dispose();
+        TurnCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationTokenSource.Token);
+        return TurnCts;
+    }
+
+    /// <summary>Cancel the current turn without killing the session.</summary>
+    public void InterruptCurrentTurn()
+    {
+        // Cancel pending approvals so the TCS unblocks
+        foreach ((string _, TaskCompletionSource<ActionDecision>? tcs) in PendingActions)
+        {
+            _ = tcs.TrySetCanceled();
+        }
+
+        PendingActions.Clear();
+        CurrentPendingAction = null;
+
+        // Cancel the turn-level token
+        TurnCts?.Cancel();
+    }
 
     /// <summary>
     /// Transition to a new state. Validates the transition is legal.
@@ -110,6 +160,8 @@ internal sealed class AgentSession : IDisposable
         }
 
         PendingActions.Clear();
+        TurnCts?.Cancel();
+        TurnCts?.Dispose();
         CancellationTokenSource.Cancel();
         CancellationTokenSource.Dispose();
     }

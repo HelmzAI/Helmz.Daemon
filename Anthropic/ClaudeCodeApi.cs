@@ -173,7 +173,7 @@ internal sealed partial class ClaudeCodeApi : IApiClient
         client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
         // Subscription (OAuth setup-token) auth — mimic Claude Code client
-        client.DefaultRequestHeaders.Add("anthropic-beta", "claude-code-20250219,oauth-2025-04-20");
+        client.DefaultRequestHeaders.Add("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,compact-2026-01-12");
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", _setupToken);
         _ = client.DefaultRequestHeaders.TryAddWithoutValidation("user-agent", "claude-cli/2.1.2 (external, cli)");
@@ -193,6 +193,8 @@ internal sealed partial class ClaudeCodeApi : IApiClient
             Messages = source.Messages,
             Tools = source.Tools,
             Stream = true,
+            Thinking = source.Thinking,
+            ContextManagement = source.ContextManagement,
         };
     }
 

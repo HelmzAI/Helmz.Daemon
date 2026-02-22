@@ -37,7 +37,8 @@ internal sealed partial class SessionManager(
     ];
 
     public Task<AgentSession> StartSessionAsync(
-        AgentProvider provider, string workingDirectory, string initialPrompt, CancellationToken cancellationToken)
+        AgentProvider provider, string workingDirectory, string initialPrompt,
+        int? thinkingBudgetTokens, string? model, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -61,7 +62,11 @@ internal sealed partial class SessionManager(
             toolRegistry.Register(tool);
         }
 
-        AgentSession session = new(sessionId, provider, workingDirectory, toolRegistry);
+        // Resolve thinking budget: request > global default > null (disabled)
+        int? resolvedBudget = thinkingBudgetTokens
+            ?? (_options.DefaultThinkingBudgetTokens > 0 ? _options.DefaultThinkingBudgetTokens : null);
+
+        AgentSession session = new(sessionId, provider, workingDirectory, toolRegistry, resolvedBudget, model);
 
         if (!_sessions.TryAdd(sessionId, session))
         {
@@ -103,22 +108,58 @@ internal sealed partial class SessionManager(
         return _sessions.GetValueOrDefault(sessionId);
     }
 
-    public Task SendCommandAsync(string sessionId, string command, CancellationToken cancellationToken)
+    public Task SendCommandAsync(string sessionId, string command, string? model, int? thinkingBudgetTokens, CancellationToken cancellationToken)
     {
         AgentSession session = _sessions.GetValueOrDefault(sessionId)
             ?? throw new KeyNotFoundException($"Session not found: {sessionId}");
 
-        if (session.State != SessionState.WaitingForInput)
+        // Apply config overrides before the next turn
+        if (!string.IsNullOrEmpty(model))
         {
-            throw new InvalidOperationException(
-                $"Session {sessionId} is not waiting for input (current state: {session.State}).");
+            session.Model = model;
         }
 
-        LogCommandSent(_logger, sessionId, Truncate(command, 100));
+        if (thinkingBudgetTokens.HasValue)
+        {
+            session.ThinkingBudgetTokens = thinkingBudgetTokens.Value > 0
+                ? thinkingBudgetTokens.Value
+                : null; // 0 = disable thinking
+        }
 
-        // Launch a new iteration of the agent loop in the background
-        _ = RunAgentLoopInBackgroundAsync(session, command);
+        if (session.State == SessionState.WaitingForInput)
+        {
+            // Session is idle — start a new turn immediately
+            LogCommandSent(_logger, sessionId, Truncate(command, 100));
+            _ = RunAgentLoopInBackgroundAsync(session, command);
+            return Task.CompletedTask;
+        }
 
+        if (session.State == SessionState.Running)
+        {
+            // Session is busy — queue the message for automatic pickup after the current turn
+            session.MessageQueue.Enqueue(command);
+            LogCommandQueued(_logger, sessionId, Truncate(command, 100));
+            return Task.CompletedTask;
+        }
+
+        // WaitingForApproval, Failed, Completed → reject
+        throw new InvalidOperationException(
+            $"Session {sessionId} cannot accept commands (current state: {session.State}).");
+    }
+
+    public Task InterruptTurnAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        AgentSession session = _sessions.GetValueOrDefault(sessionId)
+            ?? throw new KeyNotFoundException($"Session not found: {sessionId}");
+
+        if (session.State is not (SessionState.Running or SessionState.WaitingForApproval))
+        {
+            throw new InvalidOperationException(
+                $"Session {sessionId} has no active turn to interrupt (current state: {session.State}).");
+        }
+
+        LogTurnInterrupted(_logger, sessionId);
+        session.InterruptCurrentTurn();
         return Task.CompletedTask;
     }
 
@@ -158,28 +199,88 @@ internal sealed partial class SessionManager(
 
     private async Task RunAgentLoopInBackgroundAsync(AgentSession session, string prompt)
     {
+        string currentPrompt = prompt;
+
+        while (true)
+        {
+            CancellationTokenSource turnCts = session.ResetTurnCts();
+            try
+            {
+                await _agentLoop.RunAsync(session, currentPrompt, turnCts.Token).ConfigureAwait(false);
+
+                // Turn completed — check queue for next message
+                if (session.MessageQueue.TryDequeue(out string? next))
+                {
+                    LogDequeuedCommand(_logger, session.SessionId, Truncate(next, 100));
+                    currentPrompt = next;
+                    continue; // Process next queued message
+                }
+
+                return; // No more queued messages — done (session is already WaitingForInput)
+            }
+            catch (OperationCanceledException)
+            {
+                LogSessionCancelled(_logger, session.SessionId);
+
+                // If the session-level CTS is NOT cancelled, this was a turn interrupt
+                // (not a full session stop) — transition to WaitingForInput so the user
+                // can send a new prompt.
+                if (!session.CancellationTokenSource.IsCancellationRequested)
+                {
+                    _ = session.TryTransitionTo(SessionState.WaitingForInput);
+                }
+
+                // Drain the queue — queued messages are stale after an interrupt
+                while (session.MessageQueue.TryDequeue(out _)) { }
+                return;
+            }
+            catch (HttpRequestException ex)
+            {
+                LogSessionError(_logger, session.SessionId, ex.Message);
+                await PublishErrorAsync(session.SessionId, ex.Message).ConfigureAwait(false);
+                // API errors are recoverable — let the user retry with a new message
+                _ = session.TryTransitionTo(SessionState.WaitingForInput);
+                while (session.MessageQueue.TryDequeue(out _)) { }
+                return;
+            }
+            catch (InvalidOperationException ex)
+            {
+                LogSessionError(_logger, session.SessionId, ex.Message);
+                await PublishErrorAsync(session.SessionId, ex.Message).ConfigureAwait(false);
+                _ = session.TryTransitionTo(SessionState.Failed);
+                while (session.MessageQueue.TryDequeue(out _)) { }
+                return;
+            }
+            catch (TimeoutException ex)
+            {
+                LogSessionError(_logger, session.SessionId, ex.Message);
+                await PublishErrorAsync(session.SessionId, ex.Message).ConfigureAwait(false);
+                // Timeouts are transient — let the user retry
+                _ = session.TryTransitionTo(SessionState.WaitingForInput);
+                while (session.MessageQueue.TryDequeue(out _)) { }
+                return;
+            }
+        }
+    }
+
+    private async Task PublishErrorAsync(string sessionId, string errorMessage)
+    {
         try
         {
-            await _agentLoop.RunAsync(session, prompt, session.CancellationTokenSource.Token).ConfigureAwait(false);
+            OutputChunk chunk = new()
+            {
+                SessionId = sessionId,
+                Type = OutputType.Stderr,
+                Content = $"[error] {errorMessage}",
+                Timestamp = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow),
+            };
+
+            await _eventBus.PublishOutputAsync(sessionId, chunk).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            LogSessionCancelled(_logger, session.SessionId);
-        }
-        catch (HttpRequestException ex)
-        {
-            LogSessionError(_logger, session.SessionId, ex.Message);
-            _ = session.TryTransitionTo(SessionState.Failed);
-        }
-        catch (InvalidOperationException ex)
-        {
-            LogSessionError(_logger, session.SessionId, ex.Message);
-            _ = session.TryTransitionTo(SessionState.Failed);
-        }
-        catch (TimeoutException ex)
-        {
-            LogSessionError(_logger, session.SessionId, ex.Message);
-            _ = session.TryTransitionTo(SessionState.Failed);
+            // Best-effort — don't let a publishing failure mask the original error
+            LogSessionError(_logger, sessionId, $"Failed to publish error to output stream: {ex.Message}");
         }
     }
 
@@ -204,6 +305,15 @@ internal sealed partial class SessionManager(
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId} cancelled")]
     private static partial void LogSessionCancelled(ILogger logger, string sessionId);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId}: current turn interrupted")]
+    private static partial void LogTurnInterrupted(ILogger logger, string sessionId);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Session {SessionId}: command queued: {Command}")]
+    private static partial void LogCommandQueued(ILogger logger, string sessionId, string command);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Session {SessionId}: dequeued command: {Command}")]
+    private static partial void LogDequeuedCommand(ILogger logger, string sessionId, string command);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Session {SessionId} error: {ErrorMessage}")]
     private static partial void LogSessionError(ILogger logger, string sessionId, string errorMessage);

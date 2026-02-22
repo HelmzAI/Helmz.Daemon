@@ -27,6 +27,14 @@ internal sealed class MessageRequest
     [JsonPropertyName("stream")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Stream { get; init; }
+
+    [JsonPropertyName("thinking")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AnthropicThinkingConfig? Thinking { get; init; }
+
+    [JsonPropertyName("context_management")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ContextManagement? ContextManagement { get; init; }
 }
 
 internal sealed class ConversationMessage
@@ -48,6 +56,45 @@ internal sealed class ToolDefinition
 
     [JsonPropertyName("input_schema")]
     public required JsonElement InputSchema { get; init; }
+}
+
+/// <summary>
+/// Anthropic extended thinking configuration.
+/// Sent as the "thinking" field on <see cref="MessageRequest"/>.
+/// </summary>
+internal sealed class AnthropicThinkingConfig
+{
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "enabled";
+
+    [JsonPropertyName("budget_tokens")]
+    public required int BudgetTokens { get; init; }
+}
+
+/// <summary>Anthropic context management configuration for server-side compaction.</summary>
+internal sealed class ContextManagement
+{
+    [JsonPropertyName("edits")]
+    public required IReadOnlyList<ContextEdit> Edits { get; init; }
+}
+
+internal sealed class ContextEdit
+{
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "compact_20260112";
+
+    [JsonPropertyName("trigger")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ContextEditTrigger? Trigger { get; init; }
+}
+
+internal sealed class ContextEditTrigger
+{
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "input_tokens";
+
+    [JsonPropertyName("value")]
+    public required int Value { get; init; }
 }
 
 // --- Response models ---
@@ -88,9 +135,11 @@ internal abstract record ContentBlock(string Type);
 
 internal sealed record TextContentBlock(string Text) : ContentBlock("text");
 
-internal sealed record ThinkingContentBlock(string Thinking) : ContentBlock("thinking");
+internal sealed record ThinkingContentBlock(string Thinking, string Signature = "") : ContentBlock("thinking");
 
 internal sealed record ToolUseContentBlock(string Id, string Name, JsonElement Input) : ContentBlock("tool_use");
+
+internal sealed record CompactionContentBlock(string Content) : ContentBlock("compaction");
 
 // --- Tool result (sent back in user message) ---
 
@@ -131,11 +180,14 @@ internal static class ContentBlockParser
             "text" => new TextContentBlock(
                 element.GetProperty("text").GetString() ?? ""),
             "thinking" => new ThinkingContentBlock(
-                element.GetProperty("thinking").GetString() ?? ""),
+                element.GetProperty("thinking").GetString() ?? "",
+                element.TryGetProperty("signature", out JsonElement sigEl) ? sigEl.GetString() ?? "" : ""),
             "tool_use" => new ToolUseContentBlock(
                 element.GetProperty("id").GetString() ?? "",
                 element.GetProperty("name").GetString() ?? "",
                 element.GetProperty("input")),
+            "compaction" => new CompactionContentBlock(
+                element.GetProperty("content").GetString() ?? ""),
             _ => null,
         };
     }

@@ -22,6 +22,7 @@ internal sealed partial class AgentLoop(
     ILogger<AgentLoop> logger) : IAgentLoop
 {
     private const int MaxIterations = 50; // Safety valve
+    private const int MaxToolResultChars = 80_000; // ~20K tokens — prevents context overflow
 
     private readonly IApiClient _client = client;
     private readonly SessionEventBus _eventBus = eventBus;
@@ -67,6 +68,14 @@ internal sealed partial class AgentLoop(
                 return;
             }
 
+            if (stopReason is "compaction")
+            {
+                // Server-side compaction with pause — the API generated a compaction
+                // summary and paused. Continue the loop to send a follow-up request.
+                LogCompactionOccurred(_logger, session.SessionId);
+                continue;
+            }
+
             if (stopReason is "tool_use")
             {
                 // Execute each tool_use block
@@ -102,14 +111,28 @@ internal sealed partial class AgentLoop(
         // Convert conversation history to the expected format
         List<ConversationMessage> messages = [.. session.ConversationHistory.Cast<ConversationMessage>()];
 
+        int? budget = session.ThinkingBudgetTokens;
+        int compactionTrigger = _options.CompactionTriggerTokens;
         return new MessageRequest
         {
-            Model = _options.DefaultModel,
+            Model = session.Model ?? _options.DefaultModel,
             MaxTokens = _options.MaxTokens,
             System = _options.SystemPrompt,
             Messages = messages,
             Tools = session.ToolRegistry.GetToolDefinitions(),
             Stream = true,
+            Thinking = budget.HasValue
+                ? new AnthropicThinkingConfig { BudgetTokens = budget.Value }
+                : null,
+            ContextManagement = compactionTrigger > 0
+                ? new ContextManagement
+                {
+                    Edits = [new ContextEdit
+                    {
+                        Trigger = new ContextEditTrigger { Value = compactionTrigger },
+                    }],
+                }
+                : null,
         };
     }
 
@@ -130,7 +153,9 @@ internal sealed partial class AgentLoop(
         string currentBlockType = "";
         StringBuilder textAccumulator = new();
         StringBuilder thinkingAccumulator = new();
+        string thinkingSignature = "";
         StringBuilder toolInputAccumulator = new();
+        StringBuilder compactionAccumulator = new();
         string currentToolId = "";
         string currentToolName = "";
 
@@ -157,10 +182,18 @@ internal sealed partial class AgentLoop(
                                 ? name.GetString() ?? "" : "";
                             _ = toolInputAccumulator.Clear();
                         }
+                        else if (currentBlockType is "compaction")
+                        {
+                            _ = compactionAccumulator.Clear();
+                        }
+                        else if (currentBlockType is "thinking")
+                        {
+                            _ = thinkingAccumulator.Clear();
+                            thinkingSignature = "";
+                        }
                         else
                         {
                             _ = textAccumulator.Clear();
-                            _ = thinkingAccumulator.Clear();
                         }
                     }
 
@@ -197,6 +230,19 @@ internal sealed partial class AgentLoop(
                                 _ = toolInputAccumulator.Append(partial);
                                 break;
 
+                            case "signature_delta":
+                                thinkingSignature = delta.TryGetProperty("signature", out JsonElement sig)
+                                    ? sig.GetString() ?? "" : "";
+                                break;
+
+                            case "compaction_delta":
+                                string compactionContent = delta.TryGetProperty("content", out JsonElement cc)
+                                    ? cc.GetString() ?? "" : "";
+                                _ = compactionAccumulator.Append(compactionContent);
+                                await PublishOutput(session.SessionId, OutputType.Stderr,
+                                    "[compaction] context summarized by API").ConfigureAwait(false);
+                                break;
+
                             default:
                                 break;
                         }
@@ -215,9 +261,9 @@ internal sealed partial class AgentLoop(
                             break;
 
                         case "thinking":
-                            ThinkingContentBlock thinkBlock = new(thinkingAccumulator.ToString());
+                            ThinkingContentBlock thinkBlock = new(thinkingAccumulator.ToString(), thinkingSignature);
                             contentBlocks.Add(thinkBlock);
-                            rawJsonBlocks.Add(SerializeBlock(new { type = "thinking", thinking = thinkBlock.Thinking }));
+                            rawJsonBlocks.Add(SerializeBlock(new { type = "thinking", thinking = thinkBlock.Thinking, signature = thinkBlock.Signature }));
                             break;
 
                         case "tool_use":
@@ -242,6 +288,16 @@ internal sealed partial class AgentLoop(
                                 id = toolBlock.Id,
                                 name = toolBlock.Name,
                                 input = toolInput,
+                            }));
+                            break;
+
+                        case "compaction":
+                            CompactionContentBlock compactBlock = new(compactionAccumulator.ToString());
+                            contentBlocks.Add(compactBlock);
+                            rawJsonBlocks.Add(SerializeBlock(new
+                            {
+                                type = "compaction",
+                                content = compactBlock.Content,
                             }));
                             break;
 
@@ -345,10 +401,16 @@ internal sealed partial class AgentLoop(
                 toolResult = new ToolResult($"Tool execution error: {ex.Message}", IsError: true);
             }
 
+            // Offload oversized tool results to a temp file so the AI can
+            // selectively read relevant parts instead of losing the data.
+            string resultContent = toolResult.Content.Length > MaxToolResultChars
+                ? SaveToTempFile(toolResult.Content, toolUse.Name)
+                : toolResult.Content;
+
             results.Add(new ToolResultContent
             {
                 ToolUseId = toolUse.Id,
-                Content = toolResult.Content,
+                Content = resultContent,
                 IsError = toolResult.IsError,
             });
 
@@ -446,6 +508,26 @@ internal sealed partial class AgentLoop(
         return doc.RootElement.Clone();
     }
 
+    /// <summary>
+    /// Saves oversized tool output to a temp file and returns a truncated preview
+    /// with instructions for the AI to read the full output using tools.
+    /// </summary>
+    private static string SaveToTempFile(string fullContent, string toolName)
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "helmz");
+        _ = Directory.CreateDirectory(tempDir);
+
+        string fileName = $"{toolName}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}.txt";
+        string tempPath = Path.Combine(tempDir, fileName);
+        File.WriteAllText(tempPath, fullContent);
+
+        // Return the first portion as a preview + instructions
+        string preview = fullContent[..Math.Min(MaxToolResultChars / 2, fullContent.Length)];
+        return $"{preview}\n\n" +
+            $"[output truncated — full output ({fullContent.Length:N0} chars) saved to {tempPath}]\n" +
+            $"Use read_file with offset/limit, or bash tools (head, tail, grep, sed) to read specific sections.";
+    }
+
     private static string Truncate(string value, int maxLength)
     {
         return value.Length <= maxLength ? value : string.Concat(value.AsSpan(0, maxLength), "...");
@@ -458,6 +540,9 @@ internal sealed partial class AgentLoop(
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId}: conversation ended ({StopReason})")]
     private static partial void LogConversationEnd(ILogger logger, string sessionId, string stopReason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId}: context compaction occurred")]
+    private static partial void LogCompactionOccurred(ILogger logger, string sessionId);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Session {SessionId}: unknown stop_reason '{StopReason}'")]
     private static partial void LogUnknownStopReason(ILogger logger, string sessionId, string stopReason);

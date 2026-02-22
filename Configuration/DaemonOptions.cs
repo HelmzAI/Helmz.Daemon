@@ -24,4 +24,17 @@ internal sealed class DaemonOptions
 
     /// <summary>Optional system prompt override.</summary>
     public string? SystemPrompt { get; set; }
+
+    /// <summary>
+    /// Default thinking budget in tokens. 0 = thinking disabled.
+    /// Can be overridden per-session via StartSessionRequest.
+    /// </summary>
+    public int DefaultThinkingBudgetTokens { get; set; }
+
+    /// <summary>
+    /// Input token threshold that triggers server-side context compaction.
+    /// 0 = compaction disabled. Must be >= 50000 when enabled.
+    /// Default: 100000. Claude Code uses ~167K for 200K context models.
+    /// </summary>
+    public int CompactionTriggerTokens { get; set; } = 100_000;
 }
