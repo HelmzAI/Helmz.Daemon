@@ -120,12 +120,12 @@ internal static class ContentBlockParser
 {
     public static ContentBlock? Parse(JsonElement element)
     {
-        if (!element.TryGetProperty("type", out var typeProp))
+        if (!element.TryGetProperty("type", out JsonElement typeProp))
         {
             return null;
         }
 
-        var type = typeProp.GetString();
+        string? type = typeProp.GetString();
         return type switch
         {
             "text" => new TextContentBlock(

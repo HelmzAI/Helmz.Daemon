@@ -14,7 +14,7 @@ internal sealed class BashTool : ITool
 
     public string Description => "Execute a bash command. Returns stdout, stderr, and exit code. Times out after 2 minutes.";
 
-    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema("""
+    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema(/*lang=json,strict*/ """
         {
             "type": "object",
             "properties": {
@@ -35,14 +35,14 @@ internal sealed class BashTool : ITool
 
     public async Task<ToolResult> ExecuteAsync(JsonElement input, string workingDirectory, CancellationToken cancellationToken)
     {
-        var command = input.GetProperty("command").GetString()
+        string command = input.GetProperty("command").GetString()
             ?? throw new InvalidOperationException("command is required");
 
-        var timeoutMs = input.TryGetProperty("timeout_ms", out var timeoutProp)
+        int timeoutMs = input.TryGetProperty("timeout_ms", out JsonElement timeoutProp)
             ? timeoutProp.GetInt32()
             : (int)DefaultTimeout.TotalMilliseconds;
 
-        var psi = new ProcessStartInfo
+        ProcessStartInfo psi = new()
         {
             FileName = "/bin/bash",
             ArgumentList = { "-c", command },
@@ -55,21 +55,21 @@ internal sealed class BashTool : ITool
 
         try
         {
-            using var process = Process.Start(psi)
+            using Process process = Process.Start(psi)
                 ?? throw new InvalidOperationException("Failed to start bash process.");
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(timeoutMs);
 
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
-            var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
 
             await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
 
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
+            string stdout = await stdoutTask.ConfigureAwait(false);
+            string stderr = await stderrTask.ConfigureAwait(false);
 
-            var output = $"Exit code: {process.ExitCode}";
+            string output = $"Exit code: {process.ExitCode}";
             if (!string.IsNullOrEmpty(stdout))
             {
                 output += $"\n\nSTDOUT:\n{stdout}";

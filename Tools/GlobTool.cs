@@ -12,7 +12,7 @@ internal sealed class GlobTool : ITool
 
     public string Description => "Find files matching a glob pattern (e.g. \"**/*.cs\", \"src/**/*.proto\"). Returns matching file paths.";
 
-    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema("""
+    public JsonElement InputSchema { get; } = ToolRegistry.ParseSchema(/*lang=json,strict*/ """
         {
             "type": "object",
             "properties": {
@@ -33,10 +33,10 @@ internal sealed class GlobTool : ITool
 
     public Task<ToolResult> ExecuteAsync(JsonElement input, string workingDirectory, CancellationToken cancellationToken)
     {
-        var pattern = input.GetProperty("pattern").GetString()
+        string pattern = input.GetProperty("pattern").GetString()
             ?? throw new InvalidOperationException("pattern is required");
 
-        var searchPath = input.TryGetProperty("path", out var pathProp)
+        string searchPath = input.TryGetProperty("path", out JsonElement pathProp)
             ? pathProp.GetString() ?? workingDirectory
             : workingDirectory;
 
@@ -50,16 +50,13 @@ internal sealed class GlobTool : ITool
             return Task.FromResult(new ToolResult($"Directory not found: {searchPath}", IsError: true));
         }
 
-        var matcher = new Matcher();
-        matcher.AddInclude(pattern);
-        var result = matcher.GetResultsInFullPath(searchPath);
-        var files = result.OrderBy(f => f, StringComparer.Ordinal).ToList();
+        Matcher matcher = new();
+        _ = matcher.AddInclude(pattern);
+        IEnumerable<string> result = matcher.GetResultsInFullPath(searchPath);
+        List<string> files = [.. result.OrderBy(f => f, StringComparer.Ordinal)];
 
-        if (files.Count == 0)
-        {
-            return Task.FromResult(new ToolResult("No files matched the pattern."));
-        }
-
-        return Task.FromResult(new ToolResult(string.Join('\n', files)));
+        return files.Count == 0
+            ? Task.FromResult(new ToolResult("No files matched the pattern."))
+            : Task.FromResult(new ToolResult(string.Join('\n', files)));
     }
 }

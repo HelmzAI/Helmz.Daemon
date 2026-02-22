@@ -3,7 +3,6 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Helmz.Daemon.Configuration;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Helmz.Daemon.Anthropic;
@@ -55,15 +54,15 @@ internal sealed partial class ClaudeCodeApi : IApiClient
     /// <inheritdoc />
     public async Task<MessageResponse> SendMessageAsync(MessageRequest request, CancellationToken cancellationToken)
     {
-        using var httpClient = CreateClient();
-        var json = JsonSerializer.Serialize(request, SerializerOptions);
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        using HttpClient httpClient = CreateClient();
+        string json = JsonSerializer.Serialize(request, SerializerOptions);
+        using StringContent content = new(json, Encoding.UTF8, "application/json");
 
-        var url = new Uri(_options.ApiBaseUrl, "/v1/messages");
+        Uri url = new(_options.ApiBaseUrl, "/v1/messages");
         LogSendingMessage(_logger, url, request.Model);
 
-        var response = await httpClient.PostAsync(url, content, cancellationToken).ConfigureAwait(false);
-        var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage response = await httpClient.PostAsync(url, content, cancellationToken).ConfigureAwait(false);
+        string responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -80,13 +79,13 @@ internal sealed partial class ClaudeCodeApi : IApiClient
         MessageRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        using var httpClient = CreateClient();
-        var streamRequest = CloneWithStream(request);
-        var json = JsonSerializer.Serialize(streamRequest, SerializerOptions);
-        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using HttpClient httpClient = CreateClient();
+        MessageRequest streamRequest = CloneWithStream(request);
+        string json = JsonSerializer.Serialize(streamRequest, SerializerOptions);
+        using StringContent httpContent = new(json, Encoding.UTF8, "application/json");
 
-        var url = new Uri(_options.ApiBaseUrl, "/v1/messages");
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url)
+        Uri url = new(_options.ApiBaseUrl, "/v1/messages");
+        using HttpRequestMessage httpRequest = new(HttpMethod.Post, url)
         {
             Content = httpContent,
         };
@@ -94,26 +93,26 @@ internal sealed partial class ClaudeCodeApi : IApiClient
         LogStreamingMessage(_logger, url, request.Model);
 
         // ResponseHeadersRead enables streaming — we don't wait for the full body
-        using var response = await httpClient.SendAsync(
+        using HttpResponseMessage response = await httpClient.SendAsync(
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
-            var errorText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            string errorText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             LogSseError(_logger, (int)response.StatusCode, errorText);
             throw new HttpRequestException($"Anthropic API error {response.StatusCode}: {errorText}");
         }
 
-        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var reader = new StreamReader(stream);
+        using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using StreamReader reader = new(stream);
 
         string? currentEventType = null;
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            string? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
 
             // End of stream
             if (line is null)
@@ -138,7 +137,7 @@ internal sealed partial class ClaudeCodeApi : IApiClient
             // Data line: "data: {json}"
             if (line.StartsWith("data: ", StringComparison.Ordinal))
             {
-                var data = line[6..].Trim();
+                string data = line[6..].Trim();
 
                 // Some APIs use [DONE] sentinel
                 if (data is "[DONE]")
@@ -149,7 +148,7 @@ internal sealed partial class ClaudeCodeApi : IApiClient
                 JsonElement dataElement;
                 try
                 {
-                    using var doc = JsonDocument.Parse(data);
+                    using JsonDocument doc = JsonDocument.Parse(data);
                     dataElement = doc.RootElement.Clone();
                 }
                 catch (JsonException ex)
@@ -167,7 +166,7 @@ internal sealed partial class ClaudeCodeApi : IApiClient
 
     private HttpClient CreateClient()
     {
-        var client = _httpClientFactory.CreateClient("anthropic");
+        HttpClient client = _httpClientFactory.CreateClient("anthropic");
         client.Timeout = TimeSpan.FromMinutes(5); // Long timeout for streaming
 
         // Common header
@@ -177,7 +176,7 @@ internal sealed partial class ClaudeCodeApi : IApiClient
         client.DefaultRequestHeaders.Add("anthropic-beta", "claude-code-20250219,oauth-2025-04-20");
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", _setupToken);
-        client.DefaultRequestHeaders.TryAddWithoutValidation("user-agent", "claude-cli/2.1.2 (external, cli)");
+        _ = client.DefaultRequestHeaders.TryAddWithoutValidation("user-agent", "claude-cli/2.1.2 (external, cli)");
         client.DefaultRequestHeaders.Add("x-app", "cli");
 
         return client;
@@ -200,7 +199,7 @@ internal sealed partial class ClaudeCodeApi : IApiClient
     /// <summary>Extract event type from the data payload if not provided by the event: line.</summary>
     private static string ExtractEventType(JsonElement element)
     {
-        return element.TryGetProperty("type", out var typeProp)
+        return element.TryGetProperty("type", out JsonElement typeProp)
             ? typeProp.GetString() ?? "unknown"
             : "unknown";
     }
