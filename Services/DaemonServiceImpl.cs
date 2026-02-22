@@ -45,10 +45,16 @@ internal sealed class DaemonServiceImpl(ISessionManager sessionManager, SessionE
 
         try
         {
+            // Map proto fields to nullable values
+            int? thinkingBudget = request.Thinking?.BudgetTokens;
+            string? model = string.IsNullOrEmpty(request.Model) ? null : request.Model;
+
             AgentSession session = await _sessionManager.StartSessionAsync(
                 request.Provider,
                 request.WorkingDirectory,
                 request.InitialPrompt,
+                thinkingBudget,
+                model,
                 context.CancellationToken).ConfigureAwait(false);
 
             return new StartSessionResponse
@@ -99,8 +105,13 @@ internal sealed class DaemonServiceImpl(ISessionManager sessionManager, SessionE
 
         try
         {
+            string? model = string.IsNullOrEmpty(request.Model) ? null : request.Model;
+            int? thinkingBudget = request.Thinking?.BudgetTokens;
+
             await _sessionManager.SendCommandAsync(
-                request.SessionId, request.Command, context.CancellationToken).ConfigureAwait(false);
+                request.SessionId, request.Command,
+                model, thinkingBudget,
+                context.CancellationToken).ConfigureAwait(false);
             return new SendCommandResponse();
         }
         catch (KeyNotFoundException)
@@ -190,6 +201,24 @@ internal sealed class DaemonServiceImpl(ISessionManager sessionManager, SessionE
         catch (KeyNotFoundException ex)
         {
             throw new RpcException(new Status(StatusCode.NotFound, ex.Message));
+        }
+    }
+
+    public override Task<InterruptTurnResponse> InterruptTurn(
+        InterruptTurnRequest request, ServerCallContext context)
+    {
+        try
+        {
+            _ = _sessionManager.InterruptTurnAsync(request.SessionId, context.CancellationToken);
+            return Task.FromResult(new InterruptTurnResponse());
+        }
+        catch (KeyNotFoundException)
+        {
+            throw new RpcException(new Status(StatusCode.NotFound, $"Session not found: {request.SessionId}"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, ex.Message));
         }
     }
 
